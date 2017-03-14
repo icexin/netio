@@ -3,23 +3,34 @@ package main
 import (
 	"encoding/gob"
 	"flag"
+	"fmt"
 	"io"
 	"io/ioutil"
 	"log"
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 	"syscall"
 
+	"github.com/BurntSushi/toml"
 	"github.com/hashicorp/yamux"
 )
 
 var (
-	addr       = flag.String("addr", ":8126", "listen address or server address")
+	addr       = flag.String("addr", "", "listen address or server address")
 	clientMode = flag.Bool("c", false, "client mode")
 	allocTTY   = flag.Bool("t", false, "alloc tty on server")
 )
+
+var (
+	gcfg config
+)
+
+type config struct {
+	Addr string
+}
 
 type command struct {
 	Name string
@@ -132,7 +143,7 @@ func serveConn(conn net.Conn) {
 }
 
 func runServer() {
-	l, err := net.Listen("tcp", *addr)
+	l, err := net.Listen("tcp", gcfg.Addr)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -158,7 +169,7 @@ func runClient() {
 	cmdname := flag.Arg(0)
 	cmdargv := flag.Args()[1:]
 
-	conn, err := net.Dial("tcp", *addr)
+	conn, err := net.Dial("tcp", gcfg.Addr)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -198,8 +209,28 @@ func runClient() {
 	os.Exit(int(code))
 }
 
+func parseConfig() error {
+	cfgpath := filepath.Join(os.Getenv("HOME"), ".netiorc")
+	if _, err := os.Stat(cfgpath); err == nil {
+		_, err = toml.DecodeFile(cfgpath, &gcfg)
+		if err != nil {
+			return fmt.Errorf("parse .netiorc error:%s", err)
+		}
+	}
+	if *addr != "" {
+		gcfg.Addr = *addr
+	}
+	return nil
+}
+
 func main() {
 	flag.Parse()
+
+	err := parseConfig()
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	if *clientMode {
 		runClient()
 	} else {
