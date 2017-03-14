@@ -20,7 +20,7 @@ import (
 
 var (
 	addr       = flag.String("addr", "", "listen address or server address")
-	clientMode = flag.Bool("c", false, "client mode")
+	serverMode = flag.Bool("s", false, "server mode")
 	allocTTY   = flag.Bool("t", false, "alloc tty on server")
 )
 
@@ -231,7 +231,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	if *clientMode {
+	if !*serverMode {
 		runClient()
 	} else {
 		runServer()
