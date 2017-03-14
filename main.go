@@ -11,11 +11,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 
+	"golang.org/x/crypto/ssh/terminal"
+
 	"github.com/BurntSushi/toml"
 	"github.com/hashicorp/yamux"
+	"github.com/kr/pty"
 )
 
 var (
@@ -106,6 +110,7 @@ func serveConn(conn net.Conn) {
 	stdout, _ := session.AcceptStream()
 	stderr, _ := session.AcceptStream()
 
+	// decode command
 	var cmd command
 	err = gob.NewDecoder(cmdStream).Decode(&cmd)
 	if err != nil {
@@ -115,19 +120,33 @@ func serveConn(conn net.Conn) {
 	log.Printf("%s %s %q", conn.RemoteAddr(), cmd.Name, cmd.Argv)
 
 	app := exec.Command(cmd.Name, cmd.Argv...)
-	appStdin, _ := app.StdinPipe()
-	appStdout, _ := app.StdoutPipe()
-	appStderr, _ := app.StderrPipe()
+	var appStdin io.WriteCloser
+	var appStdout, appStderr io.Reader
+	if cmd.TTY {
+		fd, err := pty.Start(app)
+		if err != nil {
+			io.WriteString(stderr, err.Error())
+			gob.NewEncoder(cmdStream).Encode(-1)
+			return
+		}
+		appStdin = fd
+		appStdout = fd
+		appStderr = strings.NewReader("")
+	} else {
+		appStdin, _ = app.StdinPipe()
+		appStdout, _ = app.StdoutPipe()
+		appStderr, _ = app.StderrPipe()
+		err = app.Start()
+		if err != nil {
+			io.WriteString(stderr, err.Error())
+			gob.NewEncoder(cmdStream).Encode(-1)
+			return
+		}
+
+	}
 
 	go connect(newOutputPeer(appStdin, appStdout, appStderr),
 		newInputPeer(stdin, stdout, stderr))
-
-	err = app.Start()
-	if err != nil {
-		io.WriteString(stderr, err.Error())
-		gob.NewEncoder(cmdStream).Encode(-1)
-		return
-	}
 
 	var code int
 	err = app.Wait()
@@ -162,7 +181,7 @@ func (c nopCloser) Close() error {
 	return nil
 }
 
-func runClient() {
+func runClient() int {
 	if flag.NArg() < 1 {
 		log.Fatal("usage netio [option] cmd ...")
 	}
@@ -177,8 +196,7 @@ func runClient() {
 
 	session, err := yamux.Client(conn, nil)
 	if err != nil {
-		log.Printf("make session error:%s", err)
-		return
+		log.Fatalf("make session error:%s", err)
 	}
 
 	cmdStream, _ := session.OpenStream()
@@ -190,6 +208,16 @@ func runClient() {
 	cmd.TTY = *allocTTY
 	gob.NewEncoder(cmdStream).Encode(cmd)
 
+	if *allocTTY {
+		// make terminal into raw mode
+		oldState, err := terminal.MakeRaw(0)
+		if err != nil {
+			log.Printf("make raw terminal error:%s", err)
+			return -1
+		}
+		defer terminal.Restore(0, oldState)
+	}
+
 	// when connect returns, we know command has exited
 	connect(newOutputPeer(stdin, stdout, stderr),
 		newInputPeer(os.Stdin, nopCloser{os.Stdout}, nopCloser{os.Stderr}))
@@ -199,14 +227,14 @@ func runClient() {
 	err = gob.NewDecoder(cmdStream).Decode(&code)
 	if err != nil {
 		log.Printf("decode exit code:%s", err)
-		return
+		return -1
 	}
 
 	// 客户端主动关闭连接, 让服务端知道客户端已经接收完所有的stdout和stderr，同时也已经接收到
 	// exit code，这个时候服务端可以放心关闭客户端连接
 	session.Close()
 	conn.Close()
-	os.Exit(int(code))
+	return code
 }
 
 func parseConfig() error {
@@ -232,7 +260,7 @@ func main() {
 	}
 
 	if !*serverMode {
-		runClient()
+		os.Exit(runClient())
 	} else {
 		runServer()
 	}
