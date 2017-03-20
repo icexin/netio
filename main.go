@@ -10,7 +10,9 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"syscall"
@@ -22,10 +24,23 @@ import (
 	"github.com/kr/pty"
 )
 
+type stringListFlags []string
+
+func (l *stringListFlags) String() string {
+	return fmt.Sprintf("%v", []string(*l))
+}
+
+func (l *stringListFlags) Set(v string) error {
+	*l = append(*l, v)
+	return nil
+}
+
 var (
 	addr       = flag.String("addr", "", "listen address or server address")
 	serverMode = flag.Bool("s", false, "server mode")
 	allocTTY   = flag.Bool("t", false, "alloc tty on server")
+	compress   = flag.Bool("c", false, "compress on stream")
+	envs       stringListFlags
 )
 
 var (
@@ -37,9 +52,11 @@ type config struct {
 }
 
 type command struct {
-	Name string
-	Argv []string
-	TTY  bool
+	Name     string
+	Argv     []string
+	TTY      bool
+	Envs     []string
+	Compress bool
 }
 
 func newCommand(name string, argv ...string) *command {
@@ -100,6 +117,13 @@ func connect(out *outputPeer, in *inputPeer) {
 
 func serveConn(conn net.Conn) {
 	defer conn.Close()
+	defer func() {
+		err := recover()
+		if err != nil {
+			log.Printf("panic:%s\n%s", err, debug.Stack())
+		}
+	}()
+
 	session, err := yamux.Server(conn, nil)
 	if err != nil {
 		log.Printf("make session error:%s", err)
@@ -120,6 +144,7 @@ func serveConn(conn net.Conn) {
 	log.Printf("%s %s %q", conn.RemoteAddr(), cmd.Name, cmd.Argv)
 
 	app := exec.Command(cmd.Name, cmd.Argv...)
+	app.Env = cmd.Envs
 	var appStdin io.WriteCloser
 	var appStdout, appStderr io.Reader
 	if cmd.TTY {
@@ -181,6 +206,13 @@ func (c nopCloser) Close() error {
 	return nil
 }
 
+func ignoreSigs() {
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt, syscall.SIGINT, syscall.SIGSTOP)
+	for range c {
+	}
+}
+
 func runClient() int {
 	if flag.NArg() < 1 {
 		log.Fatal("usage netio [option] cmd ...")
@@ -206,9 +238,13 @@ func runClient() int {
 
 	cmd := newCommand(cmdname, cmdargv...)
 	cmd.TTY = *allocTTY
+	cmd.Envs = []string(envs)
 	gob.NewEncoder(cmdStream).Encode(cmd)
 
 	if *allocTTY {
+		// ignore signals
+		go ignoreSigs()
+
 		// make terminal into raw mode
 		oldState, err := terminal.MakeRaw(0)
 		if err != nil {
@@ -252,6 +288,7 @@ func parseConfig() error {
 }
 
 func main() {
+	flag.Var(&envs, "e", "envs")
 	flag.Parse()
 
 	err := parseConfig()
