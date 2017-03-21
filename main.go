@@ -40,6 +40,7 @@ var (
 	serverMode = flag.Bool("s", false, "server mode")
 	allocTTY   = flag.Bool("t", false, "alloc tty on server")
 	compress   = flag.Bool("c", false, "compress on stream")
+	workdir    = flag.String("w", "", "workdir")
 	envs       stringListFlags
 )
 
@@ -56,6 +57,7 @@ type command struct {
 	Argv     []string
 	TTY      bool
 	Envs     []string
+	WorkDir  string
 	Compress bool
 }
 
@@ -115,6 +117,15 @@ func connect(out *outputPeer, in *inputPeer) {
 	w.Wait()
 }
 
+func listenCloseAndClean(sess *yamux.Session, app *exec.Cmd) {
+	sess.Accept()
+	if app.ProcessState == nil {
+		log.Printf("process %d killed", app.Process.Pid)
+		app.Process.Kill()
+		app.Wait()
+	}
+}
+
 func serveConn(conn net.Conn) {
 	defer conn.Close()
 	defer func() {
@@ -145,6 +156,7 @@ func serveConn(conn net.Conn) {
 
 	app := exec.Command(cmd.Name, cmd.Argv...)
 	app.Env = cmd.Envs
+	app.Dir = cmd.WorkDir
 	var appStdin io.WriteCloser
 	var appStdout, appStderr io.Reader
 	if cmd.TTY {
@@ -170,6 +182,7 @@ func serveConn(conn net.Conn) {
 
 	}
 
+	go listenCloseAndClean(session, app)
 	go connect(newOutputPeer(appStdin, appStdout, appStderr),
 		newInputPeer(stdin, stdout, stderr))
 
@@ -239,6 +252,7 @@ func runClient() int {
 	cmd := newCommand(cmdname, cmdargv...)
 	cmd.TTY = *allocTTY
 	cmd.Envs = []string(envs)
+	cmd.WorkDir = *workdir
 	gob.NewEncoder(cmdStream).Encode(cmd)
 
 	if *allocTTY {
