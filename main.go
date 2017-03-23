@@ -5,15 +5,11 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"net"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"runtime/debug"
-	"strings"
 	"sync"
 	"syscall"
 
@@ -117,88 +113,6 @@ func connect(out *outputPeer, in *inputPeer) {
 	w.Wait()
 }
 
-func listenCloseAndClean(sess *yamux.Session, app *exec.Cmd) {
-	sess.Accept()
-	if app.ProcessState == nil {
-		log.Printf("process %d killed", app.Process.Pid)
-		app.Process.Kill()
-		app.Wait()
-	}
-}
-
-func serveConn(conn net.Conn) {
-	defer conn.Close()
-	defer func() {
-		err := recover()
-		if err != nil {
-			log.Printf("panic:%s\n%s", err, debug.Stack())
-		}
-	}()
-
-	session, err := yamux.Server(conn, nil)
-	if err != nil {
-		log.Printf("make session error:%s", err)
-		return
-	}
-	cmdStream, _ := session.AcceptStream()
-	stdin, _ := session.AcceptStream()
-	stdout, _ := session.AcceptStream()
-	stderr, _ := session.AcceptStream()
-
-	// decode command
-	var cmd command
-	err = gob.NewDecoder(cmdStream).Decode(&cmd)
-	if err != nil {
-		log.Printf("decode command error:%s", err)
-		return
-	}
-	log.Printf("%s %s %q", conn.RemoteAddr(), cmd.Name, cmd.Argv)
-
-	app := exec.Command(cmd.Name, cmd.Argv...)
-	app.Env = cmd.Envs
-	app.Dir = cmd.WorkDir
-	var appStdin io.WriteCloser
-	var appStdout, appStderr io.Reader
-	if cmd.TTY {
-		fd, err := pty.Start(app)
-		if err != nil {
-			io.WriteString(stderr, err.Error())
-			gob.NewEncoder(cmdStream).Encode(-1)
-			return
-		}
-		appStdin = fd
-		appStdout = fd
-		appStderr = strings.NewReader("")
-	} else {
-		appStdin, _ = app.StdinPipe()
-		appStdout, _ = app.StdoutPipe()
-		appStderr, _ = app.StderrPipe()
-		err = app.Start()
-		if err != nil {
-			io.WriteString(stderr, err.Error())
-			gob.NewEncoder(cmdStream).Encode(-1)
-			return
-		}
-
-	}
-
-	go listenCloseAndClean(session, app)
-	go connect(newOutputPeer(appStdin, appStdout, appStderr),
-		newInputPeer(stdin, stdout, stderr))
-
-	var code int
-	err = app.Wait()
-	if err != nil {
-		code = err.(*exec.ExitError).Sys().(syscall.WaitStatus).ExitStatus()
-	}
-	gob.NewEncoder(cmdStream).Encode(code)
-
-	// waiting client side close connection
-	io.Copy(ioutil.Discard, cmdStream)
-	log.Printf("%s closed", conn.RemoteAddr())
-	return
-}
-
 func runServer() {
 	l, err := net.Listen("tcp", gcfg.Addr)
 	if err != nil {
@@ -209,7 +123,38 @@ func runServer() {
 		if err != nil {
 			log.Fatal(err)
 		}
-		go serveConn(conn)
+		s := NewSession(conn)
+		go func() {
+			err := s.Serve()
+			if err != nil {
+				log.Print(err)
+			}
+			log.Printf("%s closed", s.conn.RemoteAddr())
+		}()
+
+	}
+}
+
+func sendWindowSize(enc *gob.Encoder) {
+	r, c, err := pty.Getsize(os.Stdin)
+	if err != nil {
+		return
+	}
+	x := interface{}(&WinResizeRequest{
+		Rows:    uint16(r),
+		Columns: uint16(c),
+	})
+	enc.Encode(&x)
+}
+
+func watchWindowResize(srpc *yamux.Stream) {
+	enc := gob.NewEncoder(srpc)
+	sendWindowSize(enc)
+
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGWINCH)
+	for range ch {
+		sendWindowSize(enc)
 	}
 }
 
@@ -217,13 +162,6 @@ type nopCloser struct{ io.Writer }
 
 func (c nopCloser) Close() error {
 	return nil
-}
-
-func ignoreSigs() {
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt, syscall.SIGINT, syscall.SIGSTOP)
-	for range c {
-	}
 }
 
 func runClient() int {
@@ -245,6 +183,7 @@ func runClient() int {
 	}
 
 	cmdStream, _ := session.OpenStream()
+	rpcStream, _ := session.OpenStream()
 	stdin, _ := session.OpenStream()
 	stdout, _ := session.OpenStream()
 	stderr, _ := session.OpenStream()
@@ -256,9 +195,6 @@ func runClient() int {
 	gob.NewEncoder(cmdStream).Encode(cmd)
 
 	if *allocTTY {
-		// ignore signals
-		go ignoreSigs()
-
 		// make terminal into raw mode
 		oldState, err := terminal.MakeRaw(0)
 		if err != nil {
@@ -266,6 +202,7 @@ func runClient() int {
 			return -1
 		}
 		defer terminal.Restore(0, oldState)
+		go watchWindowResize(rpcStream)
 	}
 
 	// when connect returns, we know command has exited
