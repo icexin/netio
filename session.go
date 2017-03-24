@@ -67,7 +67,8 @@ func (s *Session) accpetStream() error {
 	return nil
 }
 
-func (s *Session) sendExitCode(code int) error {
+func (s *Session) sendExitCode(code int, msg string) error {
+	s.sstderr.Write([]byte(msg))
 	return s.cmdenc.Encode(code)
 }
 
@@ -120,6 +121,7 @@ func (s *Session) startCommand() error {
 }
 
 func (s *Session) Serve() error {
+	defer s.conn.Close()
 	defer func() {
 		err := recover()
 		if err != nil {
@@ -134,6 +136,7 @@ func (s *Session) Serve() error {
 
 	err = s.setupCommand()
 	if err != nil {
+		s.sendExitCode(-1, err.Error())
 		return err
 	}
 
@@ -141,6 +144,7 @@ func (s *Session) Serve() error {
 
 	err = s.startCommand()
 	if err != nil {
+		s.sendExitCode(-1, err.Error())
 		return err
 	}
 
@@ -151,7 +155,7 @@ func (s *Session) Serve() error {
 	if err != nil {
 		code = err.(*exec.ExitError).Sys().(syscall.WaitStatus).ExitStatus()
 	}
-	s.sendExitCode(code)
+	s.sendExitCode(code, "")
 
 	// waiting client side close connection
 	io.Copy(ioutil.Discard, s.scmd)
