@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"runtime/debug"
 	"strings"
 	"syscall"
 
@@ -119,6 +120,13 @@ func (s *Session) startCommand() error {
 }
 
 func (s *Session) Serve() error {
+	defer func() {
+		err := recover()
+		if err != nil {
+			log.Printf("panic %s\n%s", err, debug.Stack())
+		}
+	}()
+
 	err := s.accpetStream()
 	if err != nil {
 		return err
