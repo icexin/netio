@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"sync"
@@ -37,6 +38,7 @@ var (
 	allocTTY   = flag.Bool("t", false, "alloc tty on server")
 	compress   = flag.Bool("c", false, "compress on stream")
 	workdir    = flag.String("w", "", "workdir")
+	child      = flag.Bool("child", false, "internal use")
 	envs       stringListFlags
 )
 
@@ -113,6 +115,29 @@ func connect(out *outputPeer, in *inputPeer) {
 	w.Wait()
 }
 
+func spawnSubprocess(conn net.Conn) {
+	f, err := conn.(*net.TCPConn).File()
+	if err != nil {
+		log.Printf("convert to file error:%s", err)
+		return
+	}
+	conn.Close()
+	cmd := exec.Command(os.Args[0], "-child")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.ExtraFiles = []*os.File{f}
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setpgid: true,
+	}
+	err = cmd.Start()
+	if err != nil {
+		log.Printf("start child process error:%s", err)
+		return
+	}
+	f.Close()
+	cmd.Wait()
+}
+
 func runServer() {
 	l, err := net.Listen("tcp", gcfg.Addr)
 	if err != nil {
@@ -123,15 +148,7 @@ func runServer() {
 		if err != nil {
 			log.Fatal(err)
 		}
-		s := NewSession(conn)
-		go func() {
-			err := s.Serve()
-			if err != nil {
-				log.Print(err)
-			}
-			log.Printf("%s closed", s.conn.RemoteAddr())
-		}()
-
+		go spawnSubprocess(conn)
 	}
 }
 
@@ -197,6 +214,7 @@ func runClient() int {
 	if *allocTTY {
 		// make terminal into raw mode
 		oldState, err := terminal.MakeRaw(0)
+
 		if err != nil {
 			log.Printf("make raw terminal error:%s", err)
 			return -1
@@ -224,6 +242,21 @@ func runClient() int {
 	return code
 }
 
+func runSession() {
+	f := os.NewFile(3, "")
+	conn, err := net.FileConn(f)
+	if err != nil {
+		log.Fatal(err)
+	}
+	f.Close()
+	s := NewSession(conn)
+	err = s.Serve()
+	if err != nil {
+		log.Print(err)
+	}
+	log.Printf("%s closed", s.conn.RemoteAddr())
+}
+
 func parseConfig() error {
 	cfgpath := filepath.Join(os.Getenv("HOME"), ".netiorc")
 	if _, err := os.Stat(cfgpath); err == nil {
@@ -245,6 +278,11 @@ func main() {
 	err := parseConfig()
 	if err != nil {
 		log.Fatal(err)
+	}
+
+	if *child {
+		runSession()
+		return
 	}
 
 	if !*serverMode {
