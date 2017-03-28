@@ -56,7 +56,7 @@ func (s *Session) serveRPC() {
 	time.Sleep(time.Millisecond)
 	if s.cmd.ProcessState == nil {
 		log.Printf("process %d killed", s.cmd.Process.Pid)
-		s.cmd.Process.Kill()
+		s.cmd.Process.Signal(syscall.SIGKILL)
 		s.cmd.Wait()
 	}
 }
