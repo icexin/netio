@@ -243,6 +243,13 @@ func runClient() int {
 }
 
 func runSession() {
+	sigch := make(chan os.Signal, 1)
+	signal.Notify(sigch, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		for range sigch {
+		}
+	}()
+
 	f := os.NewFile(3, "")
 	conn, err := net.FileConn(f)
 	if err != nil {
