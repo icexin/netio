@@ -194,7 +194,9 @@ func runClient() int {
 	}
 	defer conn.Close()
 
-	session, err := yamux.Client(conn, nil)
+	cfg := yamux.DefaultConfig()
+	cfg.EnableKeepAlive = false
+	session, err := yamux.Client(conn, cfg)
 	if err != nil {
 		log.Fatalf("make session error:%s", err)
 	}

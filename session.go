@@ -42,7 +42,9 @@ func NewSession(conn net.Conn) *Session {
 
 func (s *Session) accpetStream() error {
 	var err error
-	s.bus, err = yamux.Server(s.conn, nil)
+	cfg := yamux.DefaultConfig()
+	cfg.EnableKeepAlive = false
+	s.bus, err = yamux.Server(s.conn, cfg)
 	if err != nil {
 		return err
 	}
