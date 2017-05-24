@@ -249,6 +249,7 @@ func runSession() {
 	signal.Notify(sigch, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		for range sigch {
+			os.Exit(0)
 		}
 	}()
 
