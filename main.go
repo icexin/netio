@@ -94,7 +94,7 @@ func newOutputPeer(in io.WriteCloser, out, err io.Reader) *outputPeer {
 
 func connect(out *outputPeer, in *inputPeer) {
 	w := new(sync.WaitGroup)
-	w.Add(3)
+	w.Add(2)
 	go func() {
 		io.Copy(out.Stdin, in.Stdin)
 		out.Stdin.Close()
