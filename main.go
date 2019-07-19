@@ -94,7 +94,7 @@ func newOutputPeer(in io.WriteCloser, out, err io.Reader) *outputPeer {
 
 func connect(out *outputPeer, in *inputPeer) {
 	w := new(sync.WaitGroup)
-	w.Add(2)
+	w.Add(3)
 	go func() {
 		io.Copy(out.Stdin, in.Stdin)
 		out.Stdin.Close()
@@ -253,6 +253,7 @@ func runSession() {
 		}
 	}()
 
+	syscall.SetNonblock(3, true)
 	f := os.NewFile(3, "")
 	conn, err := net.FileConn(f)
 	if err != nil {
